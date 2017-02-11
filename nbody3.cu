@@ -54,47 +54,59 @@ const ValueType TINY2 = TINY*TINY;
 /* Generate a random double between 0,1. */
 ValueType frand(void) { return ((ValueType) rand()) / RAND_MAX; }
 
-// Store target data in registers: Compiler "may" do this automatically but
-// it often helps with cache efficiency. This can be especially helpfule
-// by avoiding repeated writes which are several times slower than reads.
-void accel_gpu (ValueType * __RESTRICT h_pos, ValueType * __RESTRICT h_vel, ValueType * __RESTRICT h_mass, ValueType * __RESTRICT h_acc, const int n)
-{
-   ValueType *d_pos = NULL;
-   ValueType *d_mass = NULL;
-   ValueType *d_acc = NULL;
-
-   cudaMalloc(&d_pos, sizeof(ValueType) * n * NDIM);
-   cudaMalloc(&d_mass, sizeof(ValueType) * n);
-   cudaMalloc(&d_acc, sizeof(ValueType) * n * NDIM);
-
-   cudaMemcpy(d_pos, h_pos, sizeof(ValueType) * n * NDIM, cudaMemcpyHostToDevice);
-   cudaMemcpy(d_mass, h_mass, sizeof(ValueType) * n, cudaMemcpyHostToDevice);
-
+__global__ void gpu_accel_kernel (ValueType * __RESTRICT d_pos, ValueType * __RESTRICT d_mass, ValueType * __RESTRICT d_acc, const int n)
+{   
    for (int i = 0; i < n; ++i)
    {
       ValueType ax = 0, ay = 0, az = 0;
-      const ValueType xi = pos_array(i,0);
-      const ValueType yi = pos_array(i,1);
-      const ValueType zi = pos_array(i,2);
+      const ValueType xi = d_pos_array(i,0);
+      const ValueType yi = d_pos_array(i,1);
+      const ValueType zi = d_pos_array(i,2);
 
       for (int j = 0; j < n; ++j)
       {
          /* Position vector from i to j and the distance^2. */
-         ValueType rx = pos_array(j,0) - xi;
-         ValueType ry = pos_array(j,1) - yi;
-         ValueType rz = pos_array(j,2) - zi;
-         ValueType dsq = rx*rx + ry*ry + rz*rz + TINY2;
-         ValueType m_invR3 = h_mass[j] / (dsq * std::sqrt(dsq));
+         ValueType rx = d_pos_array(j,0) - xi;
+         ValueType ry = d_pos_array(j,1) - yi;
+         ValueType rz = d_pos_array(j,2) - zi;
+         //ValueType dsq = rx*rx + ry*ry + rz*rz + d_tiny;
+         ValueType dsq = rx*rx + ry*ry + rz*rz + 0.000001;
+         ValueType m_invR3 = d_mass[j] / (dsq * std::sqrt(dsq));
 
          ax += rx * m_invR3;
          ay += ry * m_invR3;
          az += rz * m_invR3;
       }
 
-      acc_array(i,0) = G * ax;
-      acc_array(i,1) = G * ay;
-      acc_array(i,2) = G * az;
+      d_acc_array(i,0) = G * ax;
+      d_acc_array(i,1) = G * ay;
+      d_acc_array(i,2) = G * az;
    }
+}
+
+#define numBlocks (1)
+#define blockSize (1)
+
+// Store target data in registers: Compiler "may" do this automatically but
+// it often helps with cache efficiency. This can be especially helpfule
+// by avoiding repeated writes which are several times slower than reads.
+__host__ void accel_gpu (ValueType * __RESTRICT h_pos, ValueType * __RESTRICT h_vel, ValueType * __RESTRICT h_mass, ValueType * __RESTRICT h_acc, const int n)
+{
+   ValueType *d_pos = NULL;
+   ValueType *d_mass = NULL;
+   ValueType *d_acc = NULL;
+   //const ValueType d_tiny = TINY2;
+
+   cudaMalloc(&d_pos, sizeof(ValueType) * n * NDIM);
+   cudaMalloc(&d_mass, sizeof(ValueType) * n);
+   cudaMalloc(&d_acc, sizeof(ValueType) * n * NDIM);
+   //cudaMalloc(&d_tiny, sizeof(ValueType));
+
+   cudaMemcpy(d_pos, h_pos, sizeof(ValueType) * n * NDIM, cudaMemcpyHostToDevice);
+   cudaMemcpy(d_mass, h_mass, sizeof(ValueType) * n, cudaMemcpyHostToDevice);
+   //cudaMemcpy
+
+   //gpu_accel_kernel<<<numBlocks, blockSize>>>(d_pos, d_mass, d_acc, n);
 
    cudaMemcpy(h_acc, d_acc, sizeof(ValueType) * n * NDIM, cudaMemcpyDeviceToHost);
 
@@ -260,6 +272,7 @@ int main (int argc, char* argv[])
 #define TOSTRING(s) _TOSTRING(s)
 #ifndef ACC_FUNC
 #  define ACC_FUNC accel_gpu
+//#  define ACC_FUNC accel_cpu
 #endif
    fprintf(stderr,"Accel function = %s\n", TOSTRING(ACC_FUNC) );
 
