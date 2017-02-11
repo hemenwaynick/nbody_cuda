@@ -51,41 +51,43 @@ const ValueType TINY2 = TINY*TINY;
 #define d_pos_array(i, j) d_pos[_index((i),(j))]
 #define d_vel_array(i, j) d_vel[_index((i),(j))]
 
+#define numBlocks (10)
+#define blockSize (1000)
+
 /* Generate a random double between 0,1. */
 ValueType frand(void) { return ((ValueType) rand()) / RAND_MAX; }
 
 __global__ void gpu_accel_kernel (ValueType * __RESTRICT d_pos, ValueType * __RESTRICT d_mass, ValueType * __RESTRICT d_acc, const int n)
 {   
-   for (int i = 0; i < n; ++i)
+   int i = blockSize * blockIdx.x + threadIdx.x;
+   if (i <= n)
    {
-      ValueType ax = 0, ay = 0, az = 0;
-      const ValueType xi = d_pos_array(i,0);
-      const ValueType yi = d_pos_array(i,1);
-      const ValueType zi = d_pos_array(i,2);
+   ValueType ax = 0, ay = 0, az = 0;
+   const ValueType xi = d_pos_array(i,0);
+   const ValueType yi = d_pos_array(i,1);
+   const ValueType zi = d_pos_array(i,2);
 
-      for (int j = 0; j < n; ++j)
-      {
-         /* Position vector from i to j and the distance^2. */
-         ValueType rx = d_pos_array(j,0) - xi;
-         ValueType ry = d_pos_array(j,1) - yi;
-         ValueType rz = d_pos_array(j,2) - zi;
-         //ValueType dsq = rx*rx + ry*ry + rz*rz + d_tiny;
-         ValueType dsq = rx*rx + ry*ry + rz*rz + 0.000001;
-         ValueType m_invR3 = d_mass[j] / (dsq * std::sqrt(dsq));
+   for (int j = 0; j < n; ++j)
+   {
+      /* Position vector from i to j and the distance^2. */
+      ValueType rx = d_pos_array(j,0) - xi;
+      ValueType ry = d_pos_array(j,1) - yi;
+      ValueType rz = d_pos_array(j,2) - zi;
+      //ValueType dsq = rx*rx + ry*ry + rz*rz + d_tiny;
+      ValueType dsq = rx*rx + ry*ry + rz*rz + 0.000000001;
+      ValueType m_invR3 = d_mass[j] / (dsq * std::sqrt(dsq));
 
-         ax += rx * m_invR3;
-         ay += ry * m_invR3;
-         az += rz * m_invR3;
-      }
+      ax += rx * m_invR3;
+      ay += ry * m_invR3;
+      az += rz * m_invR3;
+   }
 
-      d_acc_array(i,0) = G * ax;
-      d_acc_array(i,1) = G * ay;
-      d_acc_array(i,2) = G * az;
+   d_acc_array(i,0) = G * ax;
+   d_acc_array(i,1) = G * ay;
+   d_acc_array(i,2) = G * az;
    }
 }
 
-#define numBlocks (1)
-#define blockSize (1)
 
 // Store target data in registers: Compiler "may" do this automatically but
 // it often helps with cache efficiency. This can be especially helpfule
@@ -95,18 +97,15 @@ __host__ void accel_gpu (ValueType * __RESTRICT h_pos, ValueType * __RESTRICT h_
    ValueType *d_pos = NULL;
    ValueType *d_mass = NULL;
    ValueType *d_acc = NULL;
-   //const ValueType d_tiny = TINY2;
 
    cudaMalloc(&d_pos, sizeof(ValueType) * n * NDIM);
    cudaMalloc(&d_mass, sizeof(ValueType) * n);
    cudaMalloc(&d_acc, sizeof(ValueType) * n * NDIM);
-   //cudaMalloc(&d_tiny, sizeof(ValueType));
 
    cudaMemcpy(d_pos, h_pos, sizeof(ValueType) * n * NDIM, cudaMemcpyHostToDevice);
    cudaMemcpy(d_mass, h_mass, sizeof(ValueType) * n, cudaMemcpyHostToDevice);
-   //cudaMemcpy
 
-   //gpu_accel_kernel<<<numBlocks, blockSize>>>(d_pos, d_mass, d_acc, n);
+   gpu_accel_kernel<<<numBlocks, blockSize>>>(d_pos, d_mass, d_acc, n);
 
    cudaMemcpy(h_acc, d_acc, sizeof(ValueType) * n * NDIM, cudaMemcpyDeviceToHost);
 
@@ -144,13 +143,51 @@ void accel_cpu (ValueType * __RESTRICT h_pos, ValueType * __RESTRICT h_vel, Valu
    }
 }
 
-void update (ValueType h_pos[], ValueType h_vel[], ValueType h_mass[], ValueType h_acc[], const int n, ValueType h)
+__global__ void gpu_update_kernel (ValueType d_pos[], ValueType d_vel[], ValueType d_acc[], const int n, ValueType h)
+{
+   int i = blockSize * blockIdx.x + threadIdx.x;
+   if (i <= n)
+   {
+      for (int k = 0; k < NDIM; ++k)
+      {
+         d_pos_array(i,k) += d_vel_array(i,k)*h + d_acc_array(i,k)*h*h/2;
+         d_vel_array(i,k) += d_acc_array(i,k)*h;
+      }
+   }
+}
+
+__host__ void update_gpu (ValueType h_pos[], ValueType h_vel[], ValueType h_mass[], ValueType h_acc[], const int n, ValueType h)
+{
+   ValueType *d_pos = NULL;
+   ValueType *d_vel = NULL;
+   ValueType *d_acc = NULL;
+
+   cudaMalloc(&d_pos, sizeof(ValueType) * n * NDIM);
+   cudaMalloc(&d_vel, sizeof(ValueType) * n * NDIM);
+   cudaMalloc(&d_acc, sizeof(ValueType) * n * NDIM);
+
+   cudaMemcpy(d_pos, h_pos, sizeof(ValueType) * n * NDIM, cudaMemcpyHostToDevice);
+   cudaMemcpy(d_vel, h_vel, sizeof(ValueType) * n * NDIM, cudaMemcpyHostToDevice);
+   cudaMemcpy(d_acc, h_acc, sizeof(ValueType) * n * NDIM, cudaMemcpyHostToDevice);
+
+   gpu_update_kernel<<<numBlocks, blockSize>>>(d_pos, d_vel, d_acc, n, h);
+
+   cudaMemcpy(h_pos, d_pos, sizeof(ValueType) * n * NDIM, cudaMemcpyDeviceToHost);
+   cudaMemcpy(h_vel, d_vel, sizeof(ValueType) * n * NDIM, cudaMemcpyDeviceToHost);
+   
+   cudaFree(d_pos);
+   cudaFree(d_vel);
+   cudaFree(d_acc);
+}
+
+
+void update (ValueType d_pos[], ValueType d_vel[], ValueType d_mass[], ValueType d_acc[], const int n, ValueType h)
 {
    for (int i = 0; i < n; ++i)
       for (int k = 0; k < NDIM; ++k)
       {
-         pos_array(i,k) += vel_array(i,k)*h + acc_array(i,k)*h*h/2;
-         vel_array(i,k) += acc_array(i,k)*h;
+         d_pos_array(i,k) += d_vel_array(i,k)*h + d_acc_array(i,k)*h*h/2;
+         d_vel_array(i,k) += d_acc_array(i,k)*h;
       }
 }
 
@@ -274,6 +311,10 @@ int main (int argc, char* argv[])
 #  define ACC_FUNC accel_gpu
 //#  define ACC_FUNC accel_cpu
 #endif
+#ifndef UPDATE_FUNC
+#  define UPDATE_FUNC update_gpu
+//#  define UPDATE_FUNC update
+#endif
    fprintf(stderr,"Accel function = %s\n", TOSTRING(ACC_FUNC) );
 
    ValueType *h_pos = NULL;
@@ -340,7 +381,7 @@ int main (int argc, char* argv[])
       myTimer_t t1 = getTimeStamp();
 
       /* 2. Advance the position and velocities. */
-      update( h_pos, h_vel, h_mass, h_acc, n, dt );
+      UPDATE_FUNC( h_pos, h_vel, h_mass, h_acc, n, dt );
 
       myTimer_t t2 = getTimeStamp();
 
