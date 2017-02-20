@@ -51,6 +51,8 @@ const ValueType TINY2 = TINY*TINY;
 #define d_pos_array(i, j) d_pos[_index((i),(j))]
 #define d_vel_array(i, j) d_vel[_index((i),(j))]
 
+#define TINY2 (DBL_EPSILON)
+
 #define numBlocks (10)
 #define blockSize (1000)
 
@@ -60,7 +62,7 @@ ValueType frand(void) { return ((ValueType) rand()) / RAND_MAX; }
 __global__ void gpu_accel_kernel (ValueType * __RESTRICT d_pos, ValueType * __RESTRICT d_mass, ValueType * __RESTRICT d_acc, const int n)
 {   
    int i = blockSize * blockIdx.x + threadIdx.x;
-   if (i <= n)
+   if (i < n)
    {
    ValueType ax = 0, ay = 0, az = 0;
    const ValueType xi = d_pos_array(i,0);
@@ -73,8 +75,7 @@ __global__ void gpu_accel_kernel (ValueType * __RESTRICT d_pos, ValueType * __RE
       ValueType rx = d_pos_array(j,0) - xi;
       ValueType ry = d_pos_array(j,1) - yi;
       ValueType rz = d_pos_array(j,2) - zi;
-      //ValueType dsq = rx*rx + ry*ry + rz*rz + d_tiny;
-      ValueType dsq = rx*rx + ry*ry + rz*rz + 0.000000001;
+      ValueType dsq = rx*rx + ry*ry + rz*rz + TINY2;
       ValueType m_invR3 = d_mass[j] / (dsq * std::sqrt(dsq));
 
       ax += rx * m_invR3;
@@ -146,7 +147,7 @@ void accel_cpu (ValueType * __RESTRICT h_pos, ValueType * __RESTRICT h_vel, Valu
 __global__ void gpu_update_kernel (ValueType d_pos[], ValueType d_vel[], ValueType d_acc[], const int n, ValueType h)
 {
    int i = blockSize * blockIdx.x + threadIdx.x;
-   if (i <= n)
+   if (i < n)
    {
       for (int k = 0; k < NDIM; ++k)
       {
@@ -181,7 +182,7 @@ __host__ void update_gpu (ValueType h_pos[], ValueType h_vel[], ValueType h_mass
 }
 
 
-void update (ValueType d_pos[], ValueType d_vel[], ValueType d_mass[], ValueType d_acc[], const int n, ValueType h)
+void update_cpu (ValueType d_pos[], ValueType d_vel[], ValueType d_mass[], ValueType d_acc[], const int n, ValueType h)
 {
    for (int i = 0; i < n; ++i)
       for (int k = 0; k < NDIM; ++k)
@@ -238,6 +239,36 @@ void search (ValueType h_pos[], ValueType h_vel[], ValueType h_mass[], ValueType
 void help()
 {
    fprintf(stderr,"nbody3 --help|-h --nparticles|-n --nsteps|-s --stepsize|-t\n");
+}
+
+__host__ void nbody_gpu (ValueType * __RESTRICT h_pos, ValueType * __RESTRICT h_vel, ValueType * __RESTRICT h_mass, ValueType * __RESTRICT h_acc, const int n, ValueType h)
+{
+   ValueType *d_pos = NULL;
+   ValueType *d_vel = NULL;
+   ValueType *d_mass = NULL;
+   ValueType *d_acc = NULL;
+
+   cudaMalloc(&d_pos, sizeof(ValueType) * n * NDIM);
+   cudaMalloc(&d_vel, sizeof(ValueType) * n * NDIM);
+   cudaMalloc(&d_mass, sizeof(ValueType) * n);
+   cudaMalloc(&d_acc, sizeof(ValueType) * n * NDIM);
+
+   cudaMemcpy(d_pos, h_pos, sizeof(ValueType) * n * NDIM, cudaMemcpyHostToDevice);
+   cudaMemcpy(d_vel, h_vel, sizeof(ValueType) * n * NDIM, cudaMemcpyHostToDevice);
+   cudaMemcpy(d_mass, h_mass, sizeof(ValueType) * n, cudaMemcpyHostToDevice);
+   cudaMemcpy(d_acc, h_acc, sizeof(ValueType) * n * NDIM, cudaMemcpyHostToDevice);
+   
+   gpu_accel_kernel<<<numBlocks, blockSize>>>(d_pos, d_mass, d_acc, n);
+   gpu_update_kernel<<<numBlocks, blockSize>>>(d_pos, d_vel, d_acc, n, h);
+
+   cudaMemcpy(h_pos, d_pos, sizeof(ValueType) * n * NDIM, cudaMemcpyDeviceToHost);
+   cudaMemcpy(h_vel, d_vel, sizeof(ValueType) * n * NDIM, cudaMemcpyDeviceToHost);
+   cudaMemcpy(h_acc, d_acc, sizeof(ValueType) * n * NDIM, cudaMemcpyDeviceToHost);
+
+   cudaFree(d_pos);
+   cudaFree(d_vel);
+   cudaFree(d_mass);
+   cudaFree(d_acc);
 }
 
 int main (int argc, char* argv[])
@@ -308,12 +339,12 @@ int main (int argc, char* argv[])
 #define _TOSTRING(s) #s
 #define TOSTRING(s) _TOSTRING(s)
 #ifndef ACC_FUNC
-#  define ACC_FUNC accel_gpu
-//#  define ACC_FUNC accel_cpu
+//#  define ACC_FUNC accel_gpu
+#  define ACC_FUNC accel_cpu
 #endif
 #ifndef UPDATE_FUNC
-#  define UPDATE_FUNC update_gpu
-//#  define UPDATE_FUNC update
+//#  define UPDATE_FUNC update_gpu
+#  define UPDATE_FUNC update_cpu
 #endif
    fprintf(stderr,"Accel function = %s\n", TOSTRING(ACC_FUNC) );
 
@@ -377,6 +408,7 @@ int main (int argc, char* argv[])
       myTimer_t t0 = getTimeStamp();
 
       ACC_FUNC( h_pos, h_vel, h_mass, h_acc, n );
+      //nbody_gpu( h_pos, h_vel, h_mass, h_acc, n, dt );
 
       myTimer_t t1 = getTimeStamp();
 
