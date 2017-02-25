@@ -182,13 +182,13 @@ __host__ void update_gpu (ValueType h_pos[], ValueType h_vel[], ValueType h_mass
 }
 
 
-void update_cpu (ValueType d_pos[], ValueType d_vel[], ValueType d_mass[], ValueType d_acc[], const int n, ValueType h)
+void update_cpu (ValueType h_pos[], ValueType h_vel[], ValueType h_mass[], ValueType h_acc[], const int n, ValueType h)
 {
    for (int i = 0; i < n; ++i)
       for (int k = 0; k < NDIM; ++k)
       {
-         d_pos_array(i,k) += d_vel_array(i,k)*h + d_acc_array(i,k)*h*h/2;
-         d_vel_array(i,k) += d_acc_array(i,k)*h;
+         pos_array(i,k) += vel_array(i,k)*h + acc_array(i,k)*h*h/2;
+         vel_array(i,k) += acc_array(i,k)*h;
       }
 }
 
@@ -216,6 +216,34 @@ void output (ValueType h_pos[], ValueType h_vel[], ValueType h_mass[], ValueType
    fclose(fp);
 }
 
+__global__ void gpu_search_kernel (ValueType d_pos[], ValueType d_vel[], ValueType d_mass[], ValueType d_acc[], ValueType d_ave[], const int n)
+{
+   __shared__ ValueType cache[blockSize];
+   ValueType minv = 1e10, maxv = 0;
+   int i = threadIdx.x;
+
+   for (int k = 0; k < NDIM; ++k)
+     cache[i] += (d_vel_array(i + blockSize * blockIdx.x, k) * d_vel_array(i + blockSize * blockIdx.x, k));
+
+   cache[i] = sqrt(cache[i]);
+
+   { 
+      maxv = fmax(maxv, cache[i]);
+      minv = fmin(minv, cache[i]);
+   }
+
+   int j = blockDim.x / 2;
+   while (j != 0) {
+      if (i < j)
+         cache[i] += cache[i + j];
+      __syncthreads();
+      j /= 2;
+   }
+
+   if (i == 0)
+      d_ave[blockIdx.x] = cache[0];
+}
+
 void search (ValueType h_pos[], ValueType h_vel[], ValueType h_mass[], ValueType h_acc[], const int n)
 {
    ValueType minv = 1e10, maxv = 0, ave = 0;
@@ -241,34 +269,48 @@ void help()
    fprintf(stderr,"nbody3 --help|-h --nparticles|-n --nsteps|-s --stepsize|-t\n");
 }
 
-__host__ void nbody_gpu (ValueType * __RESTRICT h_pos, ValueType * __RESTRICT h_vel, ValueType * __RESTRICT h_mass, ValueType * __RESTRICT h_acc, const int n, ValueType h)
+__host__ void nbody_gpu (ValueType * __RESTRICT h_pos, ValueType * __RESTRICT h_vel, ValueType * __RESTRICT h_mass, ValueType * __RESTRICT h_acc, ValueType * __RESTRICT h_ave, const int n, ValueType h)
 {
    ValueType *d_pos = NULL;
    ValueType *d_vel = NULL;
    ValueType *d_mass = NULL;
    ValueType *d_acc = NULL;
+   ValueType *d_ave = NULL;
 
    cudaMalloc(&d_pos, sizeof(ValueType) * n * NDIM);
    cudaMalloc(&d_vel, sizeof(ValueType) * n * NDIM);
    cudaMalloc(&d_mass, sizeof(ValueType) * n);
    cudaMalloc(&d_acc, sizeof(ValueType) * n * NDIM);
+   cudaMalloc(&d_ave, sizeof(ValueType) * numBlocks);
 
    cudaMemcpy(d_pos, h_pos, sizeof(ValueType) * n * NDIM, cudaMemcpyHostToDevice);
    cudaMemcpy(d_vel, h_vel, sizeof(ValueType) * n * NDIM, cudaMemcpyHostToDevice);
    cudaMemcpy(d_mass, h_mass, sizeof(ValueType) * n, cudaMemcpyHostToDevice);
-   cudaMemcpy(d_acc, h_acc, sizeof(ValueType) * n * NDIM, cudaMemcpyHostToDevice);
-   
+   cudaMemcpy(d_acc, h_acc, sizeof(ValueType) * n * NDIM, cudaMemcpyHostToDevice);   
+
    gpu_accel_kernel<<<numBlocks, blockSize>>>(d_pos, d_mass, d_acc, n);
    gpu_update_kernel<<<numBlocks, blockSize>>>(d_pos, d_vel, d_acc, n, h);
+   //gpu_search_kernel<<<numBlocks, blockSize>>>(d_pos, d_vel, d_mass, d_acc, d_ave, n);
 
    cudaMemcpy(h_pos, d_pos, sizeof(ValueType) * n * NDIM, cudaMemcpyDeviceToHost);
    cudaMemcpy(h_vel, d_vel, sizeof(ValueType) * n * NDIM, cudaMemcpyDeviceToHost);
    cudaMemcpy(h_acc, d_acc, sizeof(ValueType) * n * NDIM, cudaMemcpyDeviceToHost);
+   cudaMemcpy(h_ave, d_ave, sizeof(ValueType) * numBlocks, cudaMemcpyDeviceToHost);
 
+/*
+   // Compute average velocity
+   int ave = 0;
+   for (int i = 0; i < numBlocks; ++i)
+      ave += h_ave[i];
+   ave /= n;
+
+   printf("ave velocity = %e\n", ave);
+*/
    cudaFree(d_pos);
    cudaFree(d_vel);
    cudaFree(d_mass);
    cudaFree(d_acc);
+   cudaFree(d_ave);
 }
 
 int main (int argc, char* argv[])
@@ -352,11 +394,13 @@ int main (int argc, char* argv[])
    ValueType *h_vel = NULL;
    ValueType *h_acc = NULL;
    ValueType *h_mass = NULL;
+   ValueType *h_ave = NULL;
 
    Allocate(h_pos, n*NDIM);
    Allocate(h_vel, n*NDIM);
    Allocate(h_acc, n*NDIM);
    Allocate(h_mass, n);
+   Allocate(h_ave, numBlocks);
 
    if (1 && n == 2)
    {
@@ -407,13 +451,13 @@ int main (int argc, char* argv[])
       /* 1. Compute the acceleration on each object. */
       myTimer_t t0 = getTimeStamp();
 
-      ACC_FUNC( h_pos, h_vel, h_mass, h_acc, n );
-      //nbody_gpu( h_pos, h_vel, h_mass, h_acc, n, dt );
+      //ACC_FUNC( h_pos, h_vel, h_mass, h_acc, n );
+      nbody_gpu( h_pos, h_vel, h_mass, h_acc, h_ave, n, dt );
 
       myTimer_t t1 = getTimeStamp();
 
       /* 2. Advance the position and velocities. */
-      UPDATE_FUNC( h_pos, h_vel, h_mass, h_acc, n, dt );
+      //UPDATE_FUNC( h_pos, h_vel, h_mass, h_acc, n, dt );
 
       myTimer_t t2 = getTimeStamp();
 
